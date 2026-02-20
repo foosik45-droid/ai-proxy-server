@@ -43,21 +43,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
 
         // 2. Intercept and Mask the Payload
-        // We only care about masking the 'messages' array where the user chat content lives
-        let payload = req.body;
-
-        // Create a copy of the payload with masked messages
-        if (payload.messages && Array.isArray(payload.messages)) {
-            payload.messages = payload.messages.map(msg => {
-                if (msg.content && typeof msg.content === 'string') {
-                    return {
-                        ...msg,
-                        content: maskJsonPayload(msg.content)
-                    };
-                }
-                return msg;
-            });
-        }
+        // We mask the ENTIRE payload recursively to catch edge cases where 'content' is an array (e.g., multimodal)
+        // or other specific n8n/client payload structures.
+        let payload = maskJsonPayload(req.body);
 
         console.log(`[PROXY] Forwarding masked request to OpenAI...`);
 

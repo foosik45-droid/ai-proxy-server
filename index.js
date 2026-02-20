@@ -91,7 +91,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 // For models/embeddings/other endpoints, simply pass through without masking if needed (Not fully implemented here to keep focus on Chat)
-app.use('/v1/*', (req, res) => {
+app.use('/v1/(.*)', (req, res) => {
     res.status(501).json({ error: { message: "This proxy currently only supports /v1/chat/completions" } });
 });
 

@@ -90,13 +90,45 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 });
 
-// For models/embeddings/other endpoints, simply pass through without masking if needed (Not fully implemented here to keep focus on Chat)
-app.use((req, res, next) => {
-    if (req.path.startsWith('/v1/') && req.path !== '/v1/chat/completions') {
-        res.status(501).json({ error: { message: "This proxy currently only supports /v1/chat/completions" } });
-    } else {
-        next();
+// Forward ANY other requests (like /v1/models) directly to OpenAI without masking
+app.use((req, res) => {
+    console.log(`[PROXY-PASS-THROUGH] Forwarding ${req.method} request to ${req.originalUrl}`);
+
+    // Determine the target URL
+    const targetUrl = `https://api.openai.com${req.originalUrl}`;
+
+    // For n8n and other tools, they might send a pre-flight OPTIONS request
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
     }
+
+    // Forward the request using Axios
+    axios({
+        method: req.method,
+        url: targetUrl,
+        data: req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' ? req.body : undefined,
+        headers: {
+            'Authorization': `Bearer ${REAL_OPENAI_API_KEY}`,
+            'Content-Type': req.headers['content-type'] || 'application/json',
+        },
+        responseType: 'stream'
+    })
+        .then(response => {
+            Object.entries(response.headers).forEach(([key, value]) => {
+                res.setHeader(key, value);
+            });
+            res.status(response.status);
+            response.data.pipe(res);
+        })
+        .catch(error => {
+            console.error(`[PROXY PASS-THROUGH ERROR] for ${targetUrl}:`, error.message);
+            if (error.response) {
+                res.status(error.response.status).json(error.response.data);
+            } else {
+                res.status(500).json({ error: { message: "Internal Pass-Through Proxy Error", details: error.message } });
+            }
+        });
 });
 
 app.listen(PORT, () => {

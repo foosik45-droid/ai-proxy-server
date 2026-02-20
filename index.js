@@ -23,52 +23,68 @@ app.get('/', (req, res) => {
     res.send('AI Security Proxy Server is running! Point your AI tools to /v1/chat/completions');
 });
 
-// Proxy endpoint for OpenAI Chat Completions
-app.post('/v1/chat/completions', async (req, res) => {
+// SINGLE UNIFIED ROUTE HANDLER
+// We use a single global handler to ensure n8n or any tool cannot sneak past with unexpected URL formatting.
+app.use(async (req, res) => {
+    // 1. Pre-flight OPTIONS bypass
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+
+    console.log(`[INCOMING] ${req.method} request to ${req.originalUrl}`);
+
+    // 2. Authenticate the incoming request
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: { message: "Missing or invalid Authorization header" } });
+    }
+
+    const incomingKey = authHeader.split(' ')[1];
+    if (incomingKey !== PROXY_SECRET_KEY) {
+        return res.status(403).json({ error: { message: "Forbidden: Invalid Proxy API Key" } });
+    }
+
+    if (!REAL_OPENAI_API_KEY) {
+        console.error("Server Configuration Error: OPENAI_API_KEY is not set.");
+        return res.status(500).json({ error: { message: "Server Configuration Error: OpenAI API Key missing." } });
+    }
+
+    // Determine target URL (OpenAI ignores double slashes like //v1)
+    const targetUrl = `https://api.openai.com${req.originalUrl}`;
+    let payload = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') ? req.body : undefined;
+
+    // 3. Intercept and Mask if it's a chat/completions request
+    // We check req.originalUrl string directly to catch /v1/, //v1/, /chat/completions, etc.
+    if (req.method === 'POST' && req.originalUrl.includes('chat/completions')) {
+        console.log(`[PROXY] Intercepting chat completions payload for masking...`);
+        payload = maskJsonPayload(req.body);
+    } else {
+        console.log(`[PROXY-PASS-THROUGH] Forwarding without masking...`);
+    }
+
+    // 4. Forward the request using Axios
     try {
-        // 1. Authenticate the incoming request
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({ error: { message: "Missing or invalid Authorization header" } });
-        }
-
-        const incomingKey = authHeader.split(' ')[1];
-        if (incomingKey !== PROXY_SECRET_KEY) {
-            return res.status(403).json({ error: { message: "Forbidden: Invalid Proxy API Key" } });
-        }
-
-        if (!REAL_OPENAI_API_KEY) {
-            console.error("Server Configuration Error: OPENAI_API_KEY is not set.");
-            return res.status(500).json({ error: { message: "Server Configuration Error: OpenAI API Key missing." } });
-        }
-
-        // 2. Intercept and Mask the Payload
-        // We mask the ENTIRE payload recursively to catch edge cases where 'content' is an array (e.g., multimodal)
-        // or other specific n8n/client payload structures.
-        let payload = maskJsonPayload(req.body);
-
-        console.log(`[PROXY] Forwarding masked request to OpenAI...`);
-
-        // 3. Forward the modified payload to OpenAI
-        const response = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
+        const response = await axios({
+            method: req.method,
+            url: targetUrl,
+            data: payload,
             headers: {
                 'Authorization': `Bearer ${REAL_OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
+                // Pass original content type, fallback to json
+                'Content-Type': req.headers['content-type'] || 'application/json',
             },
-            responseType: 'stream' // Support streaming if requested
+            responseType: 'stream' // Support streaming
         });
 
-        // 4. Stream or return the response back to the client
-        // Pass along OpenAI's headers
+        // 5. Stream or return the response back to the client
         Object.entries(response.headers).forEach(([key, value]) => {
             res.setHeader(key, value);
         });
-
         res.status(response.status);
         response.data.pipe(res);
 
     } catch (error) {
-        console.error("[PROXY ERROR]", error.message);
+        console.error(`[PROXY ERROR] for ${targetUrl}:`, error.message);
         if (error.response) {
             // Forward OpenAI errors directly
             res.status(error.response.status).json(error.response.data);
@@ -76,47 +92,6 @@ app.post('/v1/chat/completions', async (req, res) => {
             res.status(500).json({ error: { message: "Internal Proxy Error", details: error.message } });
         }
     }
-});
-
-// Forward ANY other requests (like /v1/models) directly to OpenAI without masking
-app.use((req, res) => {
-    console.log(`[PROXY-PASS-THROUGH] Forwarding ${req.method} request to ${req.originalUrl}`);
-
-    // Determine the target URL
-    const targetUrl = `https://api.openai.com${req.originalUrl}`;
-
-    // For n8n and other tools, they might send a pre-flight OPTIONS request
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
-    }
-
-    // Forward the request using Axios
-    axios({
-        method: req.method,
-        url: targetUrl,
-        data: req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' ? req.body : undefined,
-        headers: {
-            'Authorization': `Bearer ${REAL_OPENAI_API_KEY}`,
-            'Content-Type': req.headers['content-type'] || 'application/json',
-        },
-        responseType: 'stream'
-    })
-        .then(response => {
-            Object.entries(response.headers).forEach(([key, value]) => {
-                res.setHeader(key, value);
-            });
-            res.status(response.status);
-            response.data.pipe(res);
-        })
-        .catch(error => {
-            console.error(`[PROXY PASS-THROUGH ERROR] for ${targetUrl}:`, error.message);
-            if (error.response) {
-                res.status(error.response.status).json(error.response.data);
-            } else {
-                res.status(500).json({ error: { message: "Internal Pass-Through Proxy Error", details: error.message } });
-            }
-        });
 });
 
 app.listen(PORT, () => {

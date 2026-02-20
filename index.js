@@ -53,13 +53,10 @@ app.use(async (req, res) => {
     const targetUrl = `https://api.openai.com${req.originalUrl}`;
     let payload = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') ? req.body : undefined;
 
-    // 3. Intercept and Mask if it's a chat/completions request
-    // We check req.originalUrl string directly to catch /v1/, //v1/, /chat/completions, etc.
-    if (req.method === 'POST' && req.originalUrl.includes('chat/completions')) {
-        console.log(`[PROXY] Intercepting chat completions payload for masking...`);
+    // 3. Intercept and Mask universally for ANY endpoint
+    if (payload) {
+        console.log(`[PROXY] Intercepting payload for masking on ${req.originalUrl}...`);
         payload = maskJsonPayload(req.body);
-    } else {
-        console.log(`[PROXY-PASS-THROUGH] Forwarding without masking...`);
     }
 
     // 4. Forward the request using Axios
